@@ -1,5 +1,6 @@
 // Compilar:  g++ -std=c++17 -O2 main.cpp -o fibheap && ./fibheap
 #include "fibonacci_heap_persistente.h"
+#include "fibonacci_heap_parcial_fatnode.h"
 #include <iostream>
 #include <random>
 #include <map>
@@ -150,22 +151,136 @@ static void prueba_lineal_decrease() {
     std::cout << "prueba lineal con decreaseKey OK (memoria " << h.memoryBytes() / (1024 * 1024) << " MB)\n";
 }
 
+// ---------------------------------------------------------------------------
+//  Los 4 tipos de persistencia
+// ---------------------------------------------------------------------------
+static void demo_tipos() {
+    std::cout << "\n== Tipos de persistencia ==\n";
+
+    // 1) PARCIAL: versiones en línea; solo se modifica la última.
+    {
+        FH h(100, Persistencia::Parcial);
+        FH::Handle a;
+        int v1 = h.insert(0, 10, &a), v2 = h.insert(v1, 4), v3 = h.decreaseKey(v2, a, 1);
+        std::cout << "[Parcial]    min: v1=" << h.getMin(v1) << " v2=" << h.getMin(v2) << " v3=" << h.getMin(v3);
+        try { h.insert(v1, 7); } catch (const std::logic_error& e) { std::cout << "  | insert(v1) -> " << e.what(); }
+        std::cout << "\n";
+
+        PartialFibonacciHeap<int> f;                 // fat node
+        FH::Handle b;
+        f.insert(10, &b); f.insert(4); f.decreaseKey(b, 1);
+        std::cout << "[Parcial/fat node] min: v1=" << f.getMin(1) << " v2=" << f.getMin(2)
+                  << " v3=" << f.getMin(3) << "  clave de b: v2=" << f.keyOf(2, b) << " v3=" << f.keyOf(3, b) << "\n";
+    }
+    // 2) TOTAL: se modifica cualquier versión -> árbol de versiones.
+    {
+        FH h(100, Persistencia::Total);
+        FH::Handle a;
+        int v1 = h.insert(h.insert(0, 10, &a), 20);
+        int ra = h.decreaseKey(v1, a, 2);            // rama A
+        int rb = h.extractMin(v1);                   // rama B (a no está en B)
+        std::cout << "[Total]      min(A)=" << h.getMin(ra) << " min(B)=" << h.getMin(rb)
+                  << " a en B? " << h.contains(rb, a);
+        try { h.merge(ra, rb); } catch (const std::logic_error& e) { std::cout << "  | merge -> " << e.what(); }
+        std::cout << "\n";
+    }
+    // 3) CONFLUENTE: unir dos versiones (heaps disjuntos).
+    {
+        FH h(100, Persistencia::Confluente);
+        int a = h.insert(h.insert(0, 7), 3);
+        int b = h.insert(h.insert(0, 9), 5);
+        int m = h.merge(a, b);
+        std::cout << "[Confluente] merge: min=" << h.getMin(m) << " size=" << h.size(m);
+        try { h.merge(m, a); } catch (const std::invalid_argument& e) { std::cout << "  | merge(m,a) -> " << e.what(); }
+        std::cout << "\n";
+    }
+    // 4) FUNCIONAL: la memoria persistente nunca modifica un nodo publicado.
+    {
+        FH h(2000);
+        int v = 0;
+        for (int i = 0; i < 1000; ++i) v = h.insert(v, i);
+        size_t antes = h.memoryBytes();
+        int w = h.extractMin(v);
+        std::cout << "[Funcional]  extractMin creo " << (h.memoryBytes() - antes) / 1024
+                  << " KB nuevos sin tocar v: min(v)=" << h.getMin(v) << " min(w)=" << h.getMin(w) << "\n";
+    }
+}
+
+static void prueba_fatnode() {
+    // se modifica la última versión; se consulta cualquier versión
+    std::mt19937 rng(31);
+    const int OPS = 30000;
+    PartialFibonacciHeap<int> f;
+    std::vector<std::pair<int, std::map<int,int>>> snaps;   // (versión, handle -> clave)
+    auto refMin = [](const std::map<int,int>& m) {
+        int best = INT_MAX; for (auto& [id, k] : m) best = std::min(best, k); return best;
+    };
+    std::map<int,int> cur;
+    for (int it = 0; it < OPS; ++it) {
+        int op = rng() % 10;
+        if (op < 4 || cur.empty()) {
+            int k = rng() % 1000000; PartialFibonacciHeap<int>::Handle id;
+            f.insert(k, &id); cur[id] = k;
+        } else if (op < 6) {
+            assert(f.getMin(f.latest()) == refMin(cur));
+            int hm = f.minHandle(f.latest());
+            f.extractMin(); cur.erase(hm);
+        } else if (op < 9) {
+            auto itr = std::next(cur.begin(), rng() % cur.size());
+            int nk = itr->second - (int)(rng() % 5000);
+            f.decreaseKey(itr->first, nk); itr->second = nk;
+        } else {
+            auto itr = std::next(cur.begin(), rng() % cur.size());
+            f.erase(itr->first); cur.erase(itr);
+        }
+        int nv = f.latest();
+        if (it % 10 == 0) snaps.push_back({nv, cur});             // guardamos algunas versiones
+        assert(f.size(nv) == (int)cur.size());
+        if (!cur.empty()) assert(f.getMin(nv) == refMin(cur));
+    }
+    // consultas sobre versiones viejas guardadas
+    for (size_t i = 0; i < snaps.size(); i += 3) {
+        int q = snaps[i].first;
+        const auto& r = snaps[i].second;
+        assert(f.size(q) == (int)r.size());
+        if (!r.empty()) assert(f.getMin(q) == refMin(r));
+        for (auto& [id, k] : r) { assert(f.contains(q, id) && f.keyOf(q, id) == k); }
+        auto e = f.elements(q);
+        std::vector<int> want;
+        for (auto& [id, k] : r) want.push_back(k);
+        std::sort(e.begin(), e.end()); std::sort(want.begin(), want.end());
+        assert(e == want);
+    }
+    std::cout << "prueba parcial fat node OK (" << f.versions() << " versiones, "
+              << f.memoryBytes() / 1024 << " KB)\n";
+}
+
 static void rendimiento() {
-    // uso lineal típico: n inserciones + n extractMin
+    // uso lineal típico: n inserciones + n extractMin, comparando las dos técnicas
     const int N = 100000;
     PersistentFibonacciHeap<int> h(N);
+    PartialFibonacciHeap<int> f(N);
     std::mt19937 rng(1);
     int v = 0;
-    for (int i = 0; i < N; ++i) v = h.insert(v, rng());
+    for (int i = 0; i < N; ++i) { int x = rng(); v = h.insert(v, x); f.insert(x); }
     int prev = INT_MIN;
-    for (int i = 0; i < N; ++i) { int x = h.getMin(v); assert(x >= prev); prev = x; v = h.extractMin(v); }
-    std::cout << "rendimiento: " << N << " insert + " << N << " extractMin OK, memoria="
-              << h.memoryBytes() / (1024 * 1024) << " MB\n";
+    for (int i = 0; i < N; ++i) {
+        int x = h.getMin(v);
+        assert(x >= prev && x == f.getMin(f.latest()));
+        prev = x; v = h.extractMin(v); f.extractMin();
+    }
+    assert(f.getMin(N / 2) == h.getMin(N / 2));      // consulta a una versión vieja
+    std::cout << "rendimiento: " << N << " insert + " << N << " extractMin OK\n"
+              << "   memoria total/confluente (path copying): " << h.memoryBytes() / (1024 * 1024) << " MB\n"
+              << "   memoria parcial (fat node):             " << f.memoryBytes() / (1024 * 1024) << " MB\n";
 }
 
 int main() {
     ejemplo();
+    demo_tipos();
+    std::cout << "\n";
     prueba_aleatoria();
     prueba_lineal_decrease();
+    prueba_fatnode();
     rendimiento();
 }

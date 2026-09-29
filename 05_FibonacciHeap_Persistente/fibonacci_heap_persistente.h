@@ -41,12 +41,30 @@
 //
 //  Requisito: T con constructor por defecto.
 //  Compare = std::less<T> -> min-heap ; std::greater<T> -> max-heap
+//
+//  Tipos de persistencia (modo del constructor):
+//    Parcial    : operaciones solo sobre la última versión; merge prohibido.
+//    Total      : operaciones sobre cualquier versión; merge prohibido.
+//    Confluente : Total + merge(v1, v2) de heaps disjuntos.
+//    Funcional  : la MEMORIA es funcional (un nodo publicado del arreglo
+//                 persistente jamás se modifica); el algoritmo de encima es el
+//                 imperativo de CLRS.
+//  Para parcial con la técnica "fat node" (~2.7x menos memoria) ver
+//  fibonacci_heap_parcial_fatnode.h
 // ============================================================================
 #include <vector>
 #include <array>
 #include <functional>
 #include <stdexcept>
 #include <utility>
+
+#ifndef EDA_PERSISTENCIA
+#define EDA_PERSISTENCIA
+// Parcial    : se consultan todas las versiones, solo se modifica la última.
+// Total      : se consulta y modifica cualquier versión (árbol de versiones).
+// Confluente : Total + operaciones que combinan dos versiones (DAG de versiones).
+enum class Persistencia { Parcial, Total, Confluente };
+#endif
 
 template <class T, class Compare = std::less<T>>
 class PersistentFibonacciHeap {
@@ -79,6 +97,7 @@ private:
     std::vector<Version> vers;
     int nextId = 1;
     Compare cmp;
+    Persistencia modo;
 
     // ---- estado de trabajo de la operación en curso ----
     int cur = 0, roots = 0, mn = 0, n = 0;
@@ -166,8 +185,11 @@ private:
     }
 
     // ======================= control de versiones =======================
+    // empieza una operación que MODIFICA la versión v
     void begin(int v) {
         const Version& s = at(v);
+        if (modo == Persistencia::Parcial && v != versions() - 1)
+            throw std::logic_error("persistencia parcial: solo se modifica la ultima version");
         trStart = tr.size();
         recStart = recs.size();
         cur = s.mem; roots = s.roots; mn = s.mn; n = s.n;
@@ -257,7 +279,8 @@ private:
 
 public:
     // maxNodes: máximo de inserciones TOTALES (sumando todas las versiones).
-    explicit PersistentFibonacciHeap(int maxNodes = (1 << 20) - 1, Compare c = Compare()) : cmp(c) {
+    explicit PersistentFibonacciHeap(int maxNodes = (1 << 20) - 1, Persistencia m = Persistencia::Confluente,
+                                     Compare c = Compare()) : cmp(c), modo(m) {
         levels = 1;
         while ((1LL << (levels * BITS)) <= maxNodes) ++levels;   // ids 1..CAP-1
         CAP = 1 << (levels * BITS);
@@ -288,7 +311,10 @@ public:
         return commit();
     }
 
+    // CONFLUENTE: la nueva versión tiene dos padres (v1 y v2).
     int merge(int v1, int v2) {
+        if (modo != Persistencia::Confluente)
+            throw std::logic_error("combinar versiones requiere persistencia confluente");
         const Version b = at(v2);        // copia: commit() puede realocar 'vers'
         begin(v1);
         if (!b.mn) return commit();
@@ -354,6 +380,8 @@ public:
     }
 
     int versions() const { return (int)vers.size(); }
+    int latest() const { return versions() - 1; }
+    Persistencia mode() const { return modo; }
     // bytes usados por las estructuras internas (aprox.)
     size_t memoryBytes() const {
         return tr.size() * sizeof(tr[0]) + recs.size() * sizeof(Rec) + rl.size() * sizeof(rl[0])

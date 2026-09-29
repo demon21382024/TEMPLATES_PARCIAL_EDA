@@ -21,12 +21,27 @@
 //  (4 bytes en vez de 8). El nodo 0 es el nulo.
 //  Requisito: T tiene constructor por defecto (se usa en el nodo nulo).
 //  Compare = std::less<T>  -> min-heap ;  std::greater<T> -> max-heap
+//
+//  Tipos de persistencia (se elige con el modo del constructor):
+//    Parcial    : push/pop solo sobre la última versión; merge prohibido.
+//    Total      : push/pop sobre cualquier versión; merge prohibido.
+//    Confluente : Total + merge(v1, v2) de dos versiones cualesquiera.
+//    Funcional  : siempre (un nodo publicado jamás se modifica).
+//  Para parcial con la técnica "fat node" ver heap_parcial_fatnode.h
 // ============================================================================
 #include <vector>
 #include <functional>
 #include <stdexcept>
 #include <utility>
 #include <algorithm>
+
+#ifndef EDA_PERSISTENCIA
+#define EDA_PERSISTENCIA
+// Parcial    : se consultan todas las versiones, solo se modifica la última.
+// Total      : se consulta y modifica cualquier versión (árbol de versiones).
+// Confluente : Total + operaciones que combinan dos versiones (DAG de versiones).
+enum class Persistencia { Parcial, Total, Confluente };
+#endif
 
 template <class T, class Compare = std::less<T>>
 class PersistentHeap {
@@ -36,6 +51,7 @@ class PersistentHeap {
     std::vector<int>  root_;    // raíz de cada versión
     std::vector<int>  size_;    // tamaño de cada versión
     Compare cmp;
+    Persistencia modo;
 
     // Crea un nodo nuevo manteniendo la propiedad zurda.
     // (key por valor: push_back puede realocar el pool)
@@ -62,10 +78,21 @@ class PersistentHeap {
     void check(int v) const {
         if (v < 0 || v >= (int)root_.size()) throw std::out_of_range("version invalida");
     }
+    // Modificar v: en modo Parcial solo se permite la última versión.
+    void checkWrite(int v) const {
+        check(v);
+        if (modo == Persistencia::Parcial && v != versions() - 1)
+            throw std::logic_error("persistencia parcial: solo se modifica la ultima version");
+    }
+    void checkConfluent() const {
+        if (modo != Persistencia::Confluente)
+            throw std::logic_error("combinar versiones requiere persistencia confluente");
+    }
 
 public:
     // reserveNodes: si conoces el nº aprox. de nodos, evita realocaciones.
-    explicit PersistentHeap(size_t reserveNodes = 0, Compare c = Compare()) : cmp(c) {
+    explicit PersistentHeap(Persistencia m = Persistencia::Confluente, size_t reserveNodes = 0,
+                            Compare c = Compare()) : cmp(c), modo(m) {
         pool.reserve(reserveNodes + 1);
         pool.push_back(Node{T(), 0, 0, 0});
         newVersion(0, 0);                      // versión 0 = heap vacío
@@ -73,25 +100,27 @@ public:
 
     // ---- operaciones: todas devuelven el ID de la NUEVA versión ----
     int push(int v, const T& x) {
-        check(v);
+        checkWrite(v);
         int leaf = make(x, 0, 0);
         return newVersion(meld(root_[v], leaf), size_[v] + 1);
     }
 
     int pop(int v) {
-        check(v);
+        checkWrite(v);
         if (!root_[v]) throw std::runtime_error("pop en heap vacio");
         const Node& r = pool[root_[v]];
         return newVersion(meld(r.l, r.r), size_[v] - 1);   // no crea la raíz, solo fusiona hijos
     }
 
+    // CONFLUENTE: la nueva versión tiene dos padres (v1 y v2). O(log n + log m).
     int merge(int v1, int v2) {
-        check(v1); check(v2);
+        checkConfluent(); check(v1); check(v2);
         return newVersion(meld(root_[v1], root_[v2]), size_[v1] + size_[v2]);
     }
 
-    // Construye una versión con todos los elementos de a en O(n)
-    // (fusiones por parejas tipo cola, como en el build de un leftist heap).
+    // Construye una versión NUEVA E INDEPENDIENTE (sin padre) con los elementos
+    // de a en O(n) (fusiones por parejas tipo cola). En modo Parcial pasa a ser
+    // la última versión.
     int build(const std::vector<T>& a) {
         if (a.empty()) return newVersion(0, 0);
         std::vector<int> q;
@@ -114,6 +143,8 @@ public:
     int  size(int v)  const { check(v); return size_[v]; }
     bool empty(int v) const { check(v); return size_[v] == 0; }
     int  versions()   const { return (int)root_.size(); }
+    int  latest()     const { return versions() - 1; }
+    Persistencia mode() const { return modo; }
     size_t nodes()    const { return pool.size(); }   // memoria usada (nº de nodos)
 
     // Devuelve los k mejores elementos de la versión v en orden, en O(k log k),
