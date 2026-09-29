@@ -1,6 +1,6 @@
 # Estructuras de Datos Persistentes — plantillas C++17
 
-Cada carpeta tiene un header reutilizable (`*.hpp`) y un `main.cpp` con un ejemplo de uso y una
+Cada carpeta tiene un header reutilizable (`*.h`) y un `main.cpp` con un ejemplo de uso y una
 prueba aleatoria contra fuerza bruta.
 
 ```bash

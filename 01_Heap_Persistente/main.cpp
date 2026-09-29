@@ -1,5 +1,5 @@
 // Compilar:  g++ -std=c++17 -O2 main.cpp -o heap && ./heap
-#include "heap_persistente.hpp"
+#include "heap_persistente.h"
 #include <iostream>
 #include <set>
 #include <random>

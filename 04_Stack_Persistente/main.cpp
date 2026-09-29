@@ -1,5 +1,5 @@
 // Compilar:  g++ -std=c++17 -O2 main.cpp -o stack && ./stack
-#include "stack_persistente.hpp"
+#include "stack_persistente.h"
 #include <iostream>
 #include <random>
 #include <cassert>

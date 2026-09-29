@@ -1,5 +1,5 @@
 // Compilar:  g++ -std=c++17 -O2 main.cpp -o trie && ./trie
-#include "trie_persistente.hpp"
+#include "trie_persistente.h"
 #include <iostream>
 #include <random>
 #include <set>

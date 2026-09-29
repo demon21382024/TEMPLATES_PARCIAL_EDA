@@ -1,5 +1,5 @@
 // Compilar:  g++ -std=c++17 -O2 main.cpp -o segtree && ./segtree
-#include "segtree_persistente.hpp"
+#include "segtree_persistente.h"
 #include <iostream>
 #include <random>
 #include <cassert>
