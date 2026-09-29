@@ -12,6 +12,7 @@
 //     maxXor / minXor             O(B)
 //     kth (k-ésimo menor)         O(B)
 //     countLess (# elementos < x) O(B)
+//     merge(v1, v2)               O(nodos donde ambos tries se solapan)
 //     Todas las consultas aceptan un PAR de versiones (vl, vr) y trabajan sobre
 //     "vr menos vl" (resta de contadores). Truco clásico: si la versión i es el
 //     prefijo a[0..i-1], la consulta (l, r+1) responde sobre el subarreglo a[l..r].
@@ -19,16 +20,33 @@
 //  2) PersistentStringTrie<SIGMA, BASE>  (multiconjunto de palabras)
 //     insert/erase/count/countPrefix   O(|s|)
 //     kth (k-ésima palabra lexicográfica) O(|s| * SIGMA)
+//     merge(v1, v2)                    O(nodos solapados * SIGMA)
 //     Memoria por inserción: (|s|+1) * (4*SIGMA + 8) bytes.
 //
 //  Nodo 0 = nulo (todos sus hijos apuntan a 0, contador 0) => la versión 0
 //  (vacía) no cuesta memoria.
+//
+//  Tipos de persistencia (modo del constructor):
+//    Parcial    : insert/erase solo sobre la última versión; merge prohibido.
+//    Total      : insert/erase sobre cualquier versión; merge prohibido.
+//    Confluente : Total + merge(v1, v2) = unión de multiconjuntos.
+//    Funcional  : siempre (un nodo publicado jamás se modifica).
+//  Consultar DOS versiones (vl, vr) está permitido en todos los modos: solo lee.
+//  Para parcial con la técnica "fat node" ver trie_parcial_fatnode.h
 // ============================================================================
 #include <vector>
 #include <array>
 #include <string>
 #include <cstdint>
 #include <stdexcept>
+
+#ifndef EDA_PERSISTENCIA
+#define EDA_PERSISTENCIA
+// Parcial    : se consultan todas las versiones, solo se modifica la última.
+// Total      : se consulta y modifica cualquier versión (árbol de versiones).
+// Confluente : Total + operaciones que combinan dos versiones (DAG de versiones).
+enum class Persistencia { Parcial, Total, Confluente };
+#endif
 
 // ---------------------------------------------------------------------------
 // 1) Trie binario persistente
@@ -42,6 +60,7 @@ private:
     std::vector<std::array<int, 2>> ch;   // hijos
     std::vector<int> cnt;                 // # de elementos en el subárbol
     std::vector<int> root_;
+    Persistencia modo;
 
     int clone(int x) {
         std::array<int, 2> c = ch[x];
@@ -52,6 +71,15 @@ private:
     }
     void check(int v) const {
         if (v < 0 || v >= (int)root_.size()) throw std::out_of_range("version invalida");
+    }
+    void checkWrite(int v) const {
+        check(v);
+        if (modo == Persistencia::Parcial && v != versions() - 1)
+            throw std::logic_error("persistencia parcial: solo se modifica la ultima version");
+    }
+    void checkConfluent() const {
+        if (modo != Persistencia::Confluente)
+            throw std::logic_error("combinar versiones requiere persistencia confluente");
     }
     // suma 'd' a todo el camino de x (d puede ser negativo) -> nueva versión
     int addPath(int v, U x, int d) {
@@ -70,10 +98,24 @@ private:
         root_.push_back(nw);
         return (int)root_.size() - 1;
     }
+    // unión de dos subárboles a profundidad 'lvl' (bits restantes); crea nodos
+    // solo donde ambos existen, lo demás se comparte
+    int unite(int a, int b, int lvl) {
+        if (!a) return b;
+        if (!b) return a;
+        int x = clone(a);
+        cnt[x] = cnt[a] + cnt[b];
+        if (lvl == 0) return x;
+        for (int bit = 0; bit < 2; ++bit) {
+            int c = unite(ch[a][bit], ch[b][bit], lvl - 1);
+            ch[x][bit] = c;
+        }
+        return x;
+    }
     int c(int a, int b) const { return cnt[a] - cnt[b]; }   // contador de "a - b"
 
 public:
-    explicit PersistentXorTrie(size_t reserveNodes = 0) {
+    explicit PersistentXorTrie(Persistencia m = Persistencia::Confluente, size_t reserveNodes = 0) : modo(m) {
         ch.reserve(reserveNodes + 1);
         cnt.reserve(reserveNodes + 1);
         ch.push_back({0, 0});
@@ -82,11 +124,18 @@ public:
     }
 
     // ---- modificaciones: devuelven la nueva versión ----
-    int insert(int v, U x, int times = 1) { check(v); return addPath(v, x, times); }
+    int insert(int v, U x, int times = 1) { checkWrite(v); return addPath(v, x, times); }
     int erase(int v, U x, int times = 1) {
-        check(v);
+        checkWrite(v);
         if (count(v, x) < times) throw std::runtime_error("erase: no hay suficientes copias");
         return addPath(v, x, -times);
+    }
+    // CONFLUENTE: nueva versión = multiconjunto v1 ∪ v2 (se suman los contadores)
+    int merge(int v1, int v2) {
+        checkConfluent(); check(v1); check(v2);
+        int r = unite(root_[v1], root_[v2], B);
+        root_.push_back(r);
+        return (int)root_.size() - 1;
     }
 
     // ---- consultas sobre la versión v, o sobre (vr - vl) ----
@@ -157,6 +206,8 @@ public:
     int countLess(int v, U x) const { return countLess(0, v, x); }
 
     int versions() const { return (int)root_.size(); }
+    int latest() const { return versions() - 1; }
+    Persistencia mode() const { return modo; }
     size_t nodes() const { return ch.size(); }
 };
 
@@ -172,10 +223,20 @@ class PersistentStringTrie {
     };
     std::vector<Node> t;
     std::vector<int> root_;
+    Persistencia modo;
 
     int clone(int x) { Node n = t[x]; t.push_back(n); return (int)t.size() - 1; }
     void check(int v) const {
         if (v < 0 || v >= (int)root_.size()) throw std::out_of_range("version invalida");
+    }
+    void checkWrite(int v) const {
+        check(v);
+        if (modo == Persistencia::Parcial && v != versions() - 1)
+            throw std::logic_error("persistencia parcial: solo se modifica la ultima version");
+    }
+    void checkConfluent() const {
+        if (modo != Persistencia::Confluente)
+            throw std::logic_error("combinar versiones requiere persistencia confluente");
     }
     static int id(char c) {
         int k = (unsigned char)c - (unsigned char)BASE;
@@ -204,19 +265,39 @@ class PersistentStringTrie {
         for (char chr : s) { if (!a) return 0; a = t[a].ch[id(chr)]; }
         return a;
     }
+    // unión de dos subárboles (recursión de profundidad = palabra más larga)
+    int unite(int a, int b) {
+        if (!a) return b;
+        if (!b) return a;
+        int x = clone(a);
+        t[x].pass = t[a].pass + t[b].pass;
+        t[x].end = t[a].end + t[b].end;
+        for (int c = 0; c < SIGMA; ++c) {
+            int y = unite(t[a].ch[c], t[b].ch[c]);
+            t[x].ch[c] = y;
+        }
+        return x;
+    }
 
 public:
-    explicit PersistentStringTrie(size_t reserveNodes = 0) {
+    explicit PersistentStringTrie(Persistencia m = Persistencia::Confluente, size_t reserveNodes = 0) : modo(m) {
         t.reserve(reserveNodes + 1);
         t.push_back(Node{});      // nulo: todo en 0
         root_.push_back(0);
     }
 
-    int insert(int v, const std::string& s) { check(v); return addPath(v, s, +1); }
+    int insert(int v, const std::string& s) { checkWrite(v); return addPath(v, s, +1); }
     int erase(int v, const std::string& s) {
-        check(v);
+        checkWrite(v);
         if (count(v, s) == 0) throw std::runtime_error("erase: la palabra no existe");
         return addPath(v, s, -1);
+    }
+    // CONFLUENTE: nueva versión = multiconjunto de palabras v1 ∪ v2
+    int merge(int v1, int v2) {
+        checkConfluent(); check(v1); check(v2);
+        int r = unite(root_[v1], root_[v2]);
+        root_.push_back(r);
+        return (int)root_.size() - 1;
     }
 
     int count(int v, const std::string& s) const { check(v); return t[walk(v, s)].end; }
@@ -241,5 +322,7 @@ public:
     }
 
     int versions() const { return (int)root_.size(); }
+    int latest() const { return versions() - 1; }
+    Persistencia mode() const { return modo; }
     size_t nodes() const { return t.size(); }
 };

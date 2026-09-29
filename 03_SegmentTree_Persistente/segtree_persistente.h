@@ -16,21 +16,41 @@
 //       query / get   : O(log n)
 //       kth(vl,vr,k)  : O(log n)  (solo si T es numérico con resta: árbol de
 //                       conteo; responde "k-ésimo menor en a[l..r]")
+//       merge(v1,v2)  : a[i] = op(a1[i], a2[i]); O(nodos solapados)
 //     Monoid debe definir:  using T;  static T id();  static T op(const T&, const T&)
 //
 //  2) PersistentRangeAddSegTree<T>   suma en rango + suma de rango
 //       add(v,l,r,d)  : O(log n) tiempo y memoria
 //       query(v,l,r)  : O(log n)
+//       merge(v1,v2)  : a[i] = a1[i] + a2[i]; O(nodos solapados)
 //     Usa "lazy permanente" (marca que NO se propaga): propagar obligaría a
 //     copiar hijos en cada consulta; así las consultas no crean nodos.
 //
 //  Índices 0-based, rangos cerrados [l, r].
+//
+//  Tipos de persistencia (modo del constructor):
+//    Parcial    : updates solo sobre la última versión; merge prohibido.
+//    Total      : updates sobre cualquier versión; merge prohibido.
+//    Confluente : Total + merge(v1, v2) (combina elemento a elemento).
+//    Funcional  : siempre (un nodo publicado jamás se modifica).
+//  Consultar DOS versiones (kth con vl, vr) está permitido en todos los modos.
+//  Para parcial con la técnica "fat node" ver segtree_parcial_fatnode.h
 // ============================================================================
 #include <vector>
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
 
+#ifndef EDA_PERSISTENCIA
+#define EDA_PERSISTENCIA
+// Parcial    : se consultan todas las versiones, solo se modifica la última.
+// Total      : se consulta y modifica cualquier versión (árbol de versiones).
+// Confluente : Total + operaciones que combinan dos versiones (DAG de versiones).
+enum class Persistencia { Parcial, Total, Confluente };
+#endif
+
+#ifndef EDA_MONOIDES
+#define EDA_MONOIDES
 // --------------------------- Monoides de ejemplo ----------------------------
 template <class X> struct SumM {
     using T = X;
@@ -47,6 +67,7 @@ template <class X> struct MaxM {
     static T id() { return std::numeric_limits<T>::lowest(); }
     static T op(const T& a, const T& b) { return std::max(a, b); }
 };
+#endif
 
 // ---------------------------------------------------------------------------
 // 1) Actualización puntual
@@ -60,6 +81,7 @@ private:
     int n;
     std::vector<Node> t;
     std::vector<int> root_;
+    Persistencia modo;
 
     int make(T val, int l, int r) {
         t.push_back(Node{std::move(val), l, r});
@@ -86,10 +108,30 @@ private:
         int mid = (lo + hi) >> 1;
         return M::op(qry(t[x].l, lo, mid, l, r), qry(t[x].r, mid + 1, hi, l, r));
     }
+    // combina dos árboles elemento a elemento; un subárbol nulo es identidad,
+    // así que se reutiliza el otro sin copiarlo
+    int unite(int a, int b, int lo, int hi) {
+        if (!a) return b;
+        if (!b) return a;
+        if (lo == hi) return make(M::op(t[a].val, t[b].val), 0, 0);
+        int mid = (lo + hi) >> 1;
+        int L = unite(t[a].l, t[b].l, lo, mid);
+        int R = unite(t[a].r, t[b].r, mid + 1, hi);
+        return make(M::op(t[L].val, t[R].val), L, R);
+    }
 
     int newVersion(int r) { root_.push_back(r); return (int)root_.size() - 1; }
     void check(int v) const {
         if (v < 0 || v >= (int)root_.size()) throw std::out_of_range("version invalida");
+    }
+    void checkWrite(int v) const {
+        check(v);
+        if (modo == Persistencia::Parcial && v != versions() - 1)
+            throw std::logic_error("persistencia parcial: solo se modifica la ultima version");
+    }
+    void checkConfluent() const {
+        if (modo != Persistencia::Confluente)
+            throw std::logic_error("combinar versiones requiere persistencia confluente");
     }
     void checkPos(int p) const {
         if (p < 0 || p >= n) throw std::out_of_range("posicion invalida");
@@ -97,21 +139,28 @@ private:
 
 public:
     // Versión 0 = arreglo de tamaño n lleno de M::id()  (sin memoria)
-    explicit PersistentSegTree(int n_, size_t reserveNodes = 0) : n(n_) {
+    explicit PersistentSegTree(int n_, Persistencia m = Persistencia::Confluente, size_t reserveNodes = 0)
+        : n(n_), modo(m) {
         t.reserve(reserveNodes + 1);
         t.push_back(Node{M::id(), 0, 0});
         newVersion(0);
     }
     // Versión 0 = arreglo a  (2n-1 nodos)
-    explicit PersistentSegTree(const std::vector<T>& a, size_t reserveNodes = 0) : n((int)a.size()) {
+    explicit PersistentSegTree(const std::vector<T>& a, Persistencia m = Persistencia::Confluente,
+                               size_t reserveNodes = 0) : n((int)a.size()), modo(m) {
         t.reserve(std::max(reserveNodes, 2 * a.size()) + 1);
         t.push_back(Node{M::id(), 0, 0});
         newVersion(n ? build(a, 0, n - 1) : 0);
     }
 
     // ---- modificaciones: devuelven la nueva versión ----
-    int set(int v, int p, const T& val)   { check(v); checkPos(p); return newVersion(upd(root_[v], 0, n - 1, p, val, true)); }
-    int apply(int v, int p, const T& val) { check(v); checkPos(p); return newVersion(upd(root_[v], 0, n - 1, p, val, false)); }
+    int set(int v, int p, const T& val)   { checkWrite(v); checkPos(p); return newVersion(upd(root_[v], 0, n - 1, p, val, true)); }
+    int apply(int v, int p, const T& val) { checkWrite(v); checkPos(p); return newVersion(upd(root_[v], 0, n - 1, p, val, false)); }
+    // CONFLUENTE: nueva versión con a[i] = op(v1[i], v2[i])
+    int merge(int v1, int v2) {
+        checkConfluent(); check(v1); check(v2);
+        return newVersion(n ? unite(root_[v1], root_[v2], 0, n - 1) : 0);
+    }
 
     // ---- consultas ----
     T query(int v, int l, int r) const {
@@ -139,6 +188,8 @@ public:
     }
 
     int versions() const { return (int)root_.size(); }
+    int latest() const { return versions() - 1; }
+    Persistencia mode() const { return modo; }
     size_t nodes() const { return t.size(); }
     int length() const { return n; }
 };
@@ -154,6 +205,7 @@ class PersistentRangeAddSegTree {
     int n;
     std::vector<Node> t;
     std::vector<int> root_;
+    Persistencia modo;
 
     int clone(int x) { Node c = t[x]; t.push_back(c); return (int)t.size() - 1; }
     int build(const std::vector<T>& a, int lo, int hi) {
@@ -181,29 +233,54 @@ class PersistentRangeAddSegTree {
         if (r > mid)  res += qry(t[x].r, mid + 1, hi, l, r, acc);
         return res;
     }
+    // suma elemento a elemento: sumas y marcas se suman nodo a nodo
+    int unite(int a, int b) {
+        if (!a) return b;
+        if (!b) return a;
+        int L = unite(t[a].l, t[b].l);
+        int R = unite(t[a].r, t[b].r);
+        t.push_back(Node{t[a].sum + t[b].sum, t[a].add + t[b].add, L, R});
+        return (int)t.size() - 1;
+    }
     int newVersion(int r) { root_.push_back(r); return (int)root_.size() - 1; }
     void check(int v) const {
         if (v < 0 || v >= (int)root_.size()) throw std::out_of_range("version invalida");
+    }
+    void checkWrite(int v) const {
+        check(v);
+        if (modo == Persistencia::Parcial && v != versions() - 1)
+            throw std::logic_error("persistencia parcial: solo se modifica la ultima version");
+    }
+    void checkConfluent() const {
+        if (modo != Persistencia::Confluente)
+            throw std::logic_error("combinar versiones requiere persistencia confluente");
     }
     void checkRange(int l, int r) const {
         if (l < 0 || r >= n || l > r) throw std::out_of_range("rango invalido");
     }
 
 public:
-    explicit PersistentRangeAddSegTree(int n_, size_t reserveNodes = 0) : n(n_) {   // todo ceros
+    explicit PersistentRangeAddSegTree(int n_, Persistencia m = Persistencia::Confluente, size_t reserveNodes = 0)
+        : n(n_), modo(m) {                                                  // todo ceros
         t.reserve(reserveNodes + 1);
         t.push_back(Node{T(0), T(0), 0, 0});
         newVersion(0);
     }
-    explicit PersistentRangeAddSegTree(const std::vector<T>& a, size_t reserveNodes = 0) : n((int)a.size()) {
+    explicit PersistentRangeAddSegTree(const std::vector<T>& a, Persistencia m = Persistencia::Confluente,
+                                       size_t reserveNodes = 0) : n((int)a.size()), modo(m) {
         t.reserve(std::max(reserveNodes, 2 * a.size()) + 1);
         t.push_back(Node{T(0), T(0), 0, 0});
         newVersion(n ? build(a, 0, n - 1) : 0);
     }
 
     int add(int v, int l, int r, const T& d) {
-        check(v); checkRange(l, r);
+        checkWrite(v); checkRange(l, r);
         return newVersion(upd(root_[v], 0, n - 1, l, r, d));
+    }
+    // CONFLUENTE: nueva versión con a[i] = v1[i] + v2[i]
+    int merge(int v1, int v2) {
+        checkConfluent(); check(v1); check(v2);
+        return newVersion(unite(root_[v1], root_[v2]));
     }
     T query(int v, int l, int r) const {
         check(v); checkRange(l, r);
@@ -212,6 +289,8 @@ public:
     T get(int v, int p) const { return query(v, p, p); }
 
     int versions() const { return (int)root_.size(); }
+    int latest() const { return versions() - 1; }
+    Persistencia mode() const { return modo; }
     size_t nodes() const { return t.size(); }
     int length() const { return n; }
 };
